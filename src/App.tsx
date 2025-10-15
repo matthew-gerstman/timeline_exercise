@@ -1,5 +1,5 @@
 import { addDays } from 'date-fns'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { TimelineBoard, type TimelineViewport } from './TimelineBoard'
 
 const today = new Date()
@@ -81,16 +81,33 @@ const seedTasks = [
 
 export function App() {
   const [tasks, setTasks] = useState(seedTasks)
+  const [viewportStart, setViewportStart] = useState(addDays(today, -14))
+  const [viewportEnd, setViewportEnd] = useState(addDays(today, 100))
+  
   const viewport: TimelineViewport = useMemo(() => {
-    const start = addDays(today, -14)
-    const end = addDays(today, 100)
-    return { start, end, pxPerDay: 16 }
+    return { start: viewportStart, end: viewportEnd, pxPerDay: 16 }
+  }, [viewportStart, viewportEnd])
+
+  const handleReachStart = useCallback(() => {
+    // Expand viewport to the left by 30 days
+    setViewportStart(prev => addDays(prev, -30))
+  }, [])
+
+  const handleReachEnd = useCallback(() => {
+    // Expand viewport to the right by 30 days
+    setViewportEnd(prev => addDays(prev, 30))
   }, [])
 
   return (
     <div className="w-full h-screen bg-gray-50 flex items-center justify-center p-8">
       <div className="w-full max-w-7xl h-full bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-        <TimelineBoard tasks={tasks as any} setTasks={setTasks as any} viewport={viewport} />
+        <TimelineBoard 
+          tasks={tasks as any} 
+          setTasks={setTasks as any} 
+          viewport={viewport}
+          onReachStart={handleReachStart}
+          onReachEnd={handleReachEnd}
+        />
       </div>
     </div>
   )

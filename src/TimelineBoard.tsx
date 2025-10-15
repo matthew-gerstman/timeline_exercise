@@ -185,7 +185,12 @@ function BarsLayer({
 /**
  * Custom hook to encapsulate all scroll-related logic for the timeline
  */
-function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
+function useTimelineScroll(
+  tasks: TimelineTask[], 
+  viewport: TimelineViewport,
+  onReachStart?: () => void,
+  onReachEnd?: () => void
+) {
   const rightPaneRef = useRef<HTMLDivElement | null>(null)
   const scrollerRef = useRef<HTMLDivElement | null>(null)
   const leftScrollerRef = useRef<HTMLDivElement | null>(null)
@@ -194,6 +199,13 @@ function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
   
   const [viewportH, setViewportH] = useState(0)
   const [scrollLeft, setScrollLeft] = useState(0)
+
+  // Track previous scroll position to detect when crossing thresholds
+  const prevScrollLeftRef = useRef(0)
+  
+  // Track if we've already fired the callbacks to prevent repeated calls
+  const hasReachedStartRef = useRef(false)
+  const hasReachedEndRef = useRef(false)
 
   // Measure viewport height to extend today marker fully even with few rows
   useEffect(() => {
@@ -251,7 +263,34 @@ function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
   // Right scroller onScroll handler - tracks horizontal scroll and syncs vertical to left
   const handleRightScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const scroller = e.currentTarget
-    setScrollLeft(scroller.scrollLeft)
+    const currentScrollLeft = scroller.scrollLeft
+    const prevScrollLeft = prevScrollLeftRef.current
+    setScrollLeft(currentScrollLeft)
+
+    // Check if we've reached the start (left edge) - only trigger if we crossed the threshold
+    const threshold = 100 // Trigger expansion earlier to allow seamless scrolling
+    if (currentScrollLeft <= threshold && prevScrollLeft > threshold) {
+      if (!hasReachedStartRef.current) {
+        hasReachedStartRef.current = true
+        onReachStart?.()
+      }
+    } else if (currentScrollLeft > threshold) {
+      hasReachedStartRef.current = false
+    }
+
+    // Check if we've reached the end (right edge)
+    const maxScroll = scroller.scrollWidth - scroller.clientWidth
+    if (currentScrollLeft >= maxScroll - threshold && prevScrollLeft < maxScroll - threshold) {
+      if (!hasReachedEndRef.current) {
+        hasReachedEndRef.current = true
+        onReachEnd?.()
+      }
+    } else if (currentScrollLeft < maxScroll - threshold) {
+      hasReachedEndRef.current = false
+    }
+
+    // Update previous scroll position
+    prevScrollLeftRef.current = currentScrollLeft
 
     // vertical sync to left
     const left = leftScrollerRef.current
@@ -262,7 +301,7 @@ function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
         syncingRef.current = false
       })
     }
-  }, [])
+  }, [onReachStart, onReachEnd])
 
   // Horizontal panning handler for pointer drag
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -285,9 +324,37 @@ function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
       if (!panning) return
       const dx = ev.clientX - startX
       const newScrollLeft = startScrollLeft - dx
+      const prevScrollLeft = prevScrollLeftRef.current
       scroller.scrollLeft = newScrollLeft
       // Explicitly update scrollLeft state to keep header in sync during panning
       setScrollLeft(newScrollLeft)
+      
+      // Edge detection during panning
+      const threshold = 100
+      const maxScroll = scroller.scrollWidth - scroller.clientWidth
+      
+      // Check left edge
+      if (newScrollLeft <= threshold && prevScrollLeft > threshold) {
+        if (!hasReachedStartRef.current) {
+          hasReachedStartRef.current = true
+          onReachStart?.()
+        }
+      } else if (newScrollLeft > threshold) {
+        hasReachedStartRef.current = false
+      }
+      
+      // Check right edge
+      if (newScrollLeft >= maxScroll - threshold && prevScrollLeft < maxScroll - threshold) {
+        if (!hasReachedEndRef.current) {
+          hasReachedEndRef.current = true
+          onReachEnd?.()
+        }
+      } else if (newScrollLeft < maxScroll - threshold) {
+        hasReachedEndRef.current = false
+      }
+      
+      // Update previous scroll position
+      prevScrollLeftRef.current = newScrollLeft
     }
     const onUp = () => {
       panning = false
@@ -299,7 +366,7 @@ function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
-  }, [])
+  }, [onReachStart, onReachEnd])
 
   return {
     refs: {
@@ -429,6 +496,8 @@ export function TimelineBoard({
   viewport,
   onOrderChanged,
   onRowDoubleClick,
+  onReachStart,
+  onReachEnd,
 }: TimelineBoardProps) {
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
@@ -442,7 +511,28 @@ export function TimelineBoard({
   }, [activeRow])
 
   // Use the scroll hook for all scroll-related functionality
-  const scroll = useTimelineScroll(tasks, viewport)
+  const scroll = useTimelineScroll(tasks, viewport, onReachStart, onReachEnd)
+
+  // Prevent browser back navigation when scrolling horizontally at edges
+  useEffect(() => {
+    const scroller = scroll.refs.scrollerRef.current
+    if (!scroller) return
+    
+    const preventBrowserNav = (e: WheelEvent) => {
+      // Only prevent when scrolling horizontally AND at an edge
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const atLeftEdge = scroller.scrollLeft <= 0 && e.deltaX < 0
+        const atRightEdge = scroller.scrollLeft >= scroller.scrollWidth - scroller.clientWidth && e.deltaX > 0
+        
+        if (atLeftEdge || atRightEdge) {
+          e.preventDefault()
+        }
+      }
+    }
+    
+    scroller.addEventListener('wheel', preventBrowserNav, { passive: false })
+    return () => scroller.removeEventListener('wheel', preventBrowserNav)
+  }, [scroll.refs.scrollerRef])
 
   const tasksIds = useMemo(() => tasks.map((t) => t.id), [tasks])
 
