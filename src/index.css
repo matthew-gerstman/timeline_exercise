@@ -1,6 +1,18 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Hide vertical scrollbars only */
+* {
+  scrollbar-width: none; /* Firefox - hides all scrollbars (Firefox doesn't support direction-specific) */
+}
+
+*::-webkit-scrollbar:vertical {
+  display: none; /* Chrome, Safari, Opera - hide vertical only */
+}
+
+/* For IE/Edge - hide vertical scrollbar */
+* {
+  -ms-overflow-style: -ms-autohiding-scrollbar;
+}
 
 body {
   margin: 0;
@@ -11,7 +23,6 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-#root {
-  width: 100vw;
+#root {  
   height: 100vh;
 }

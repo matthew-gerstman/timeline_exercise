@@ -14,7 +14,7 @@ import { arrayMove, SortableContext as SortableContextBase, useSortable } from '
 import { CSS } from '@dnd-kit/utilities'
 import { addDays, differenceInCalendarDays, format, isAfter, isBefore, isValid } from 'date-fns'
 import { ChevronLeft, Plus } from 'lucide-react'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 // dnd-kit JSX typing workaround for React 19
 const SortableCtx = SortableContextBase as unknown as React.FC<any>
@@ -26,6 +26,7 @@ export interface TimelineTask {
   start: Date | null
   end: Date | null
   baseIndex: number
+  isSentinel?: boolean
 }
 
 export interface TimelineViewport {
@@ -40,6 +41,8 @@ export interface TimelineBoardProps {
   viewport: TimelineViewport
   onOrderChanged?: (orderedIds: string[], movedId?: string) => void
   onRowDoubleClick?: (taskId: string) => void
+  onReachStart?: () => void
+  onReachEnd?: () => void
 }
 
 function clampDate(d: Date, start: Date, end: Date) {
@@ -48,7 +51,7 @@ function clampDate(d: Date, start: Date, end: Date) {
   return d
 }
 
-function Row({ task, onDoubleClick }: { task: TimelineTask; onDoubleClick?: () => void }) {
+function Row({ task, onDoubleClick, sentinelRef }: { task: TimelineTask; onDoubleClick?: () => void; sentinelRef?: (el: HTMLDivElement | null) => void }) {
   const sortable = useSortable({ id: task.id, data: { type: 'Row', task }, attributes: { roleDescription: 'Row' } })
   const transform = CSS.Transform.toString(sortable.transform)
   const style = { transform, transition: sortable.transition }
@@ -56,6 +59,22 @@ function Row({ task, onDoubleClick }: { task: TimelineTask; onDoubleClick?: () =
   const handleDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     onDoubleClick?.()
+  }
+
+  // Sentinel tasks are invisible and 1px high
+  if (task.isSentinel) {
+    return (
+      <div 
+        ref={(el) => {
+          sortable.setNodeRef(el)
+          sentinelRef?.(el)
+        }}
+        style={style as any}
+        {...sortable.attributes}
+        className="relative h-px pointer-events-none"
+        data-sentinel-id={task.id}
+      />
+    )
   }
 
   return (
@@ -111,6 +130,8 @@ function BarsLayer({
       {/* bars */}
       <div>
         {tasks.map((t, rowIndex) => {
+          // Skip sentinel tasks
+          if (t.isSentinel) return null
           const start = t.start && isValid(t.start) ? clampDate(t.start, viewport.start, viewport.end) : null
           const end = t.end && isValid(t.end) ? clampDate(t.end, viewport.start, viewport.end) : null
           if (!start || !end) return null
@@ -161,6 +182,146 @@ function BarsLayer({
   )
 }
 
+/**
+ * Custom hook to encapsulate all scroll-related logic for the timeline
+ */
+function useTimelineScroll(tasks: TimelineTask[], viewport: TimelineViewport) {
+  const rightPaneRef = useRef<HTMLDivElement | null>(null)
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const leftScrollerRef = useRef<HTMLDivElement | null>(null)
+  const headerRef = useRef<HTMLDivElement | null>(null)
+  const syncingRef = useRef(false)
+  
+  const [viewportH, setViewportH] = useState(0)
+  const [scrollLeft, setScrollLeft] = useState(0)
+
+  // Measure viewport height to extend today marker fully even with few rows
+  useEffect(() => {
+    const el = rightPaneRef.current
+    if (!el) return
+    const update = () => setViewportH(el.clientHeight || 0)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Derive viewport pixel calculations
+  const pxPerDay = viewport.pxPerDay ?? 16
+
+  // Handler to scroll to a task's bar
+  const scrollToTask = useCallback(
+    (taskId: string) => {
+      const task = tasks.find((t) => String(t.id) === taskId)
+      if (!task) return
+      const scroller = scrollerRef.current
+      if (!scroller) return
+
+      const start = task.start && isValid(task.start) ? clampDate(task.start, viewport.start, viewport.end) : null
+      if (!start) return
+
+      const startOffset = Math.max(0, differenceInCalendarDays(start, viewport.start)) * pxPerDay
+      const targetScrollLeft = startOffset - scroller.clientWidth / 2
+      scroller.scrollTo({ left: targetScrollLeft, behavior: 'smooth' })
+    },
+    [tasks, viewport, pxPerDay]
+  )
+
+  // Handler for bar double-click to center the bar
+  const handleBarDoubleClick = useCallback((_taskId: string, barLeftPx: number) => {
+    const scroller = scrollerRef.current
+    if (!scroller) return
+    const targetScrollLeft = barLeftPx - scroller.clientWidth / 2
+    scroller.scrollTo({ left: targetScrollLeft, behavior: 'smooth' })
+  }, [])
+
+  // Left scroller onScroll handler - syncs vertical scroll to right
+  const handleLeftScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (syncingRef.current) return
+    const left = e.currentTarget
+    const right = scrollerRef.current
+    if (!right) return
+    syncingRef.current = true
+    right.scrollTop = left.scrollTop
+    requestAnimationFrame(() => {
+      syncingRef.current = false
+    })
+  }, [])
+
+  // Right scroller onScroll handler - tracks horizontal scroll and syncs vertical to left
+  const handleRightScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const scroller = e.currentTarget
+    setScrollLeft(scroller.scrollLeft)
+
+    // vertical sync to left
+    const left = leftScrollerRef.current
+    if (!syncingRef.current && left) {
+      syncingRef.current = true
+      left.scrollTop = scroller.scrollTop
+      requestAnimationFrame(() => {
+        syncingRef.current = false
+      })
+    }
+  }, [])
+
+  // Horizontal panning handler for pointer drag
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    // Begin horizontal panning on left mouse or touch
+    if (e.button !== 0 && e.pointerType !== 'touch') return
+    const scroller = (scrollerRef.current as HTMLElement) || null
+    if (!scroller) return
+    e.preventDefault()
+    try {
+      ;(e.currentTarget as unknown as Element).setPointerCapture?.(e.pointerId)
+    } catch {}
+    const startX = e.clientX
+    const startScrollLeft = scroller.scrollLeft
+    let panning = true
+    // Update cursor
+    const el = e.currentTarget as HTMLElement
+    const prevCursor = el.style.cursor
+    el.style.cursor = 'grabbing'
+    const onMove = (ev: PointerEvent) => {
+      if (!panning) return
+      const dx = ev.clientX - startX
+      const newScrollLeft = startScrollLeft - dx
+      scroller.scrollLeft = newScrollLeft
+      // Explicitly update scrollLeft state to keep header in sync during panning
+      setScrollLeft(newScrollLeft)
+    }
+    const onUp = () => {
+      panning = false
+      el.style.cursor = prevCursor
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+  }, [])
+
+  return {
+    refs: {
+      rightPaneRef,
+      scrollerRef,
+      leftScrollerRef,
+      headerRef,
+    },
+    state: {
+      scrollLeft,
+      viewportH,
+    },
+    handlers: {
+      handleLeftScroll,
+      handleRightScroll,
+      handlePointerDown,
+      scrollToTask,
+      handleBarDoubleClick,
+    },
+  }
+}
+
 const TimelineHeader = React.forwardRef<
   HTMLDivElement,
   {
@@ -170,7 +331,6 @@ const TimelineHeader = React.forwardRef<
 >(({ viewport, scrollLeft = 0 }, ref) => {
   const pxPerDay = viewport.pxPerDay ?? 16
   const daysTotal = Math.max(1, differenceInCalendarDays(viewport.end, viewport.start) + 1)
-  const totalPx = daysTotal * pxPerDay
 
   // Months across full viewport
   const months: Array<{ label: string; span: number }> = []
@@ -281,23 +441,8 @@ export function TimelineBoard({
     activeRef.current = activeRow
   }, [activeRow])
 
-  // Measure viewport height to extend today marker fully even with few rows
-  const rightPaneRef = useRef<HTMLDivElement | null>(null)
-  const scrollerRef = useRef<HTMLDivElement | null>(null)
-  const leftScrollerRef = useRef<HTMLDivElement | null>(null)
-  const headerRef = useRef<HTMLDivElement | null>(null)
-  const syncingRef = useRef(false)
-  const [viewportH, setViewportH] = useState(0)
-  const [scrollLeft, setScrollLeft] = useState(0)
-  useEffect(() => {
-    const el = rightPaneRef.current
-    if (!el) return
-    const update = () => setViewportH(el.clientHeight || 0)
-    update()
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
+  // Use the scroll hook for all scroll-related functionality
+  const scroll = useTimelineScroll(tasks, viewport)
 
   const tasksIds = useMemo(() => tasks.map((t) => t.id), [tasks])
 
@@ -330,46 +475,21 @@ export function TimelineBoard({
   const pxPerDay = viewport.pxPerDay ?? 16
   const totalPx = days * pxPerDay
 
-  // Handler to scroll to a task's bar
-  const scrollToTask = (taskId: string) => {
-    const task = tasks.find((t) => String(t.id) === taskId)
-    if (!task) return
-    const scroller = scrollerRef.current
-    if (!scroller) return
-
-    const start = task.start && isValid(task.start) ? clampDate(task.start, viewport.start, viewport.end) : null
-    if (!start) return
-
-    const startOffset = Math.max(0, differenceInCalendarDays(start, viewport.start)) * pxPerDay
-    const targetScrollLeft = startOffset - scroller.clientWidth / 2
-    scroller.scrollTo({ left: targetScrollLeft, behavior: 'smooth' })
-  }
-
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
       <div className="h-full flex flex-col">
         <TimelineHeader
-          ref={headerRef}
+          ref={scroll.refs.headerRef}
           viewport={viewport}
-          scrollLeft={scrollLeft}
+          scrollLeft={scroll.state.scrollLeft}
         />
         <div className="flex-1 min-h-0 flex">
           {/* Left list */}
           <div className="w-64 shrink-0 border-r border-gray-200">
             <div
               className="h-full overflow-auto"
-              ref={leftScrollerRef as any}
-              onScroll={(e) => {
-                if (syncingRef.current) return
-                const left = e.currentTarget
-                const right = scrollerRef.current
-                if (!right) return
-                syncingRef.current = true
-                right.scrollTop = left.scrollTop
-                requestAnimationFrame(() => {
-                  syncingRef.current = false
-                })
-              }}
+              ref={scroll.refs.leftScrollerRef as any}
+              onScroll={scroll.handlers.handleLeftScroll}
             >
               <div className="relative" style={{ height: tasks.length * 40 }}>
                 <SortableCtx items={tasksIds as any}>
@@ -378,7 +498,7 @@ export function TimelineBoard({
                       key={String(t.id)}
                       task={t}
                       onDoubleClick={() => {
-                        scrollToTask(String(t.id))
+                        scroll.handlers.scrollToTask(String(t.id))
                         onRowDoubleClick?.(String(t.id))
                       }}
                     />
@@ -388,72 +508,21 @@ export function TimelineBoard({
             </div>
           </div>
           {/* Right timeline grid */}
-          <div className="flex-1 overflow-auto relative" ref={rightPaneRef as any}>
+          <div className="flex-1 overflow-auto relative" ref={scroll.refs.rightPaneRef as any}>
             <div
               className="h-full overflow-auto"
-              ref={scrollerRef as any}
-              onScroll={(e) => {
-                const scroller = e.currentTarget
-
-                setScrollLeft(scroller.scrollLeft)
-
-                // vertical sync to left
-                const left = leftScrollerRef.current
-                if (!syncingRef.current && left) {
-                  syncingRef.current = true
-                  left.scrollTop = scroller.scrollTop
-                  requestAnimationFrame(() => {
-                    syncingRef.current = false
-                  })
-                }
-              }}
+              ref={scroll.refs.scrollerRef as any}
+              onScroll={scroll.handlers.handleRightScroll}
             >
               <div
                 className="relative min-h-full cursor-grab"
-                style={{ width: totalPx, height: Math.max(tasks.length * 40, viewportH) }}
-                onPointerDown={(e) => {
-                  // Begin horizontal panning on left mouse or touch
-                  if (e.button !== 0 && e.pointerType !== 'touch') return
-                  const scroller = (scrollerRef.current as HTMLElement) || null
-                  if (!scroller) return
-                  e.preventDefault()
-                  try {
-                    ;(e.currentTarget as unknown as Element).setPointerCapture?.(e.pointerId)
-                  } catch {}
-                  const startX = e.clientX
-                  const startScrollLeft = scroller.scrollLeft
-                  let panning = true
-                  // Update cursor
-                  const el = e.currentTarget as HTMLElement
-                  const prevCursor = el.style.cursor
-                  el.style.cursor = 'grabbing'
-                  const onMove = (ev: PointerEvent) => {
-                    if (!panning) return
-                    const dx = ev.clientX - startX
-                    scroller.scrollLeft = startScrollLeft - dx
-                  }
-                  const onUp = () => {
-                    panning = false
-                    el.style.cursor = prevCursor
-                    window.removeEventListener('pointermove', onMove)
-                    window.removeEventListener('pointerup', onUp)
-                    window.removeEventListener('pointercancel', onUp)
-                  }
-                  window.addEventListener('pointermove', onMove)
-                  window.addEventListener('pointerup', onUp)
-                  window.addEventListener('pointercancel', onUp)
-                }}
+                style={{ width: totalPx, height: Math.max(tasks.length * 40, scroll.state.viewportH) }}
+                onPointerDown={scroll.handlers.handlePointerDown}
               >
                 <BarsLayer
                   tasks={tasks}
                   viewport={viewport}
-                  onBarDoubleClick={(taskId, barLeftPx) => {
-                    const scroller = scrollerRef.current
-                    if (!scroller) return
-                    // Center the bar in the viewport
-                    const targetScrollLeft = barLeftPx - scroller.clientWidth / 2
-                    scroller.scrollTo({ left: targetScrollLeft, behavior: 'smooth' })
-                  }}
+                  onBarDoubleClick={scroll.handlers.handleBarDoubleClick}
                 />
               </div>
             </div>
