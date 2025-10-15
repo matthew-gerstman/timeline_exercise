@@ -81,7 +81,7 @@ const seedTasks = [
 
 export function App() {
   const [tasks, setTasks] = useState(seedTasks)
-  const [viewportStart, setViewportStart] = useState(addDays(today, -14))
+  const [viewportStart, setViewportStart] = useState(addDays(today, -60)) // Start 2 months before
   const [viewportEnd, setViewportEnd] = useState(addDays(today, 100))
   
   const viewport: TimelineViewport = useMemo(() => {

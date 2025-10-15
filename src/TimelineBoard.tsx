@@ -268,7 +268,7 @@ function useTimelineScroll(
     setScrollLeft(currentScrollLeft)
 
     // Check if we've reached the start (left edge) - only trigger if we crossed the threshold
-    const threshold = 100 // Trigger expansion earlier to allow seamless scrolling
+    const threshold = 480 // Trigger when 1 month (30 days * 16px) of buffer remains
     if (currentScrollLeft <= threshold && prevScrollLeft > threshold) {
       if (!hasReachedStartRef.current) {
         hasReachedStartRef.current = true
@@ -330,7 +330,7 @@ function useTimelineScroll(
       setScrollLeft(newScrollLeft)
       
       // Edge detection during panning
-      const threshold = 100
+      const threshold = 480 // Trigger when 1 month (30 days * 16px) of buffer remains
       const maxScroll = scroller.scrollWidth - scroller.clientWidth
       
       // Check left edge
@@ -512,6 +512,23 @@ export function TimelineBoard({
 
   // Use the scroll hook for all scroll-related functionality
   const scroll = useTimelineScroll(tasks, viewport, onReachStart, onReachEnd)
+
+  // Scroll to today's date on initial load
+  useEffect(() => {
+    const scroller = scroll.refs.scrollerRef.current
+    if (!scroller) return
+    
+    const today = new Date()
+    const pxPerDay = viewport.pxPerDay ?? 16
+    const daysFromStart = differenceInCalendarDays(today, viewport.start)
+    const todayPosition = daysFromStart * pxPerDay
+    
+    // Center today in the viewport
+    const scrollTo = todayPosition - scroller.clientWidth / 2
+    scroller.scrollLeft = scrollTo
+    
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Only run on mount
 
   // Prevent browser back navigation when scrolling horizontally at edges
   useEffect(() => {
