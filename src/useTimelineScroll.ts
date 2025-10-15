@@ -21,12 +21,6 @@ export interface TimelineViewport {
   pxPerDay?: number
 }
 
-interface ScrollState {
-  scroller: HTMLDivElement
-  currentScrollLeft: number
-  prevScrollLeft: number
-}
-
 interface OnScrollLeftArgs {
   currentScrollLeft: number
   prevScrollLeft: number
@@ -35,12 +29,20 @@ interface OnScrollLeftArgs {
   event: React.UIEvent<HTMLDivElement>
 }
 
+// Consolidated scroll tracking state
+interface ScrollTracking {
+  prevScrollLeft: number
+  hasReachedEnd: boolean
+  isScrollingLeft: boolean
+  scrollStopTimeout: number | null
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
 
 const TWELVE_MONTHS_IN_DAYS = 360
-const RIGHT_EDGE_THRESHOLD_PX = 480 // Trigger expansion when 1 month of buffer remains
+const RIGHT_EDGE_THRESHOLD_PX = 480
 const SCROLL_STOP_DEBOUNCE_MS = 150
 
 // ============================================================================
@@ -90,18 +92,18 @@ export function useTimelineScroll(
   const headerRef = useRef<HTMLDivElement | null>(null)
   
   // ============================================================================
-  // Refs - Scroll State Tracking
+  // Refs - Consolidated State Tracking
   // ============================================================================
   
-  const syncingRef = useRef(false) // Prevent infinite scroll sync loops
-  const prevScrollLeftRef = useRef(0) // Track previous horizontal scroll position
-  const hasReachedEndRef = useRef(false) // Prevent repeated end callbacks
+  const syncingVerticalRef = useRef(false)
   
-  // Left scroll tracking
-  const scrollingLeftRef = useRef(false) // Currently scrolling left?
-  const wasScrollingLeftRef = useRef(false) // Was scrolling left (for stop detection)
-  const scrollLeftTimeoutRef = useRef<number | null>(null) // Debounce scroll stop
-  const lastScrollStateRef = useRef<ScrollState | null>(null) // Last state for stop callback
+  // Single ref object for all scroll tracking
+  const scrollTrackingRef = useRef<ScrollTracking>({
+    prevScrollLeft: 0,
+    hasReachedEnd: false,
+    isScrollingLeft: false,
+    scrollStopTimeout: null,
+  })
   
   // ============================================================================
   // State
@@ -133,99 +135,101 @@ export function useTimelineScroll(
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  
+  // Cleanup scroll stop timeout on unmount
+  useEffect(() => {
+    return () => {
+      const timeout = scrollTrackingRef.current.scrollStopTimeout
+      if (timeout) clearTimeout(timeout)
+    }
+  }, [])
 
   // ============================================================================
-  // Helper Functions - Scroll Detection
+  // Helper Functions
   // ============================================================================
 
-  const checkAndHandleLeftScroll = useCallback((
+  const handleScrollUpdate = useCallback((
     currentScrollLeft: number,
-    prevScrollLeft: number,
     scroller: HTMLDivElement,
     event: React.UIEvent<HTMLDivElement>
   ) => {
-    if (currentScrollLeft >= prevScrollLeft) {
-      // Not scrolling left - reset state
-      scrollingLeftRef.current = false
-      wasScrollingLeftRef.current = false
-      if (scrollLeftTimeoutRef.current) {
-        clearTimeout(scrollLeftTimeoutRef.current)
-        scrollLeftTimeoutRef.current = null
+    const tracking = scrollTrackingRef.current
+    const prevScrollLeft = tracking.prevScrollLeft
+    
+    // Update scroll position state
+    setScrollLeft(currentScrollLeft)
+    
+    // Check if scrolling left
+    const isMovingLeft = currentScrollLeft < prevScrollLeft
+    
+    if (isMovingLeft) {
+      const scrollDelta = prevScrollLeft - currentScrollLeft
+      
+      // Notify scroll callback
+      onScrollLeft?.({
+        currentScrollLeft,
+        prevScrollLeft,
+        scrollDelta,
+        scroller,
+        event
+      })
+      
+      // Trigger reach start if near the left edge
+      if (!tracking.isScrollingLeft && currentScrollLeft < twelveMonthsPx) {
+        tracking.isScrollingLeft = true
+        onReachStart?.()
       }
-      return
-    }
-
-    // User is scrolling left
-    const scrollDelta = prevScrollLeft - currentScrollLeft
-    
-    // Notify immediate scroll callback
-    onScrollLeft?.({
-      currentScrollLeft,
-      prevScrollLeft,
-      scrollDelta,
-      scroller,
-      event
-    })
-    
-    // Store state for the stop callback
-    lastScrollStateRef.current = { scroller, currentScrollLeft, prevScrollLeft }
-    wasScrollingLeftRef.current = true
-    
-    // Trigger reach start if we have less than 12 months of unseen content
-    if (!scrollingLeftRef.current && currentScrollLeft < twelveMonthsPx) {
-      scrollingLeftRef.current = true
-      onReachStart?.()
-    }
-    
-    // Set up debounced stop detection
-    if (scrollLeftTimeoutRef.current) {
-      clearTimeout(scrollLeftTimeoutRef.current)
-    }
-    
-    scrollLeftTimeoutRef.current = setTimeout(() => {
-      if (wasScrollingLeftRef.current && lastScrollStateRef.current) {
-        wasScrollingLeftRef.current = false
+      
+      // Setup debounced stop detection
+      if (tracking.scrollStopTimeout) {
+        clearTimeout(tracking.scrollStopTimeout)
+      }
+      
+      tracking.scrollStopTimeout = setTimeout(() => {
+        tracking.isScrollingLeft = false
         
-        // Notify scroll stopped
         onScrollLeft?.({
-          currentScrollLeft: lastScrollStateRef.current.currentScrollLeft,
-          prevScrollLeft: lastScrollStateRef.current.prevScrollLeft,
+          currentScrollLeft: scrollTrackingRef.current.prevScrollLeft,
+          prevScrollLeft: scrollTrackingRef.current.prevScrollLeft,
           scrollDelta: 0,
-          scroller: lastScrollStateRef.current.scroller,
+          scroller,
           event
         })
         
         onStopScrollingLeft?.()
+      }, SCROLL_STOP_DEBOUNCE_MS) as unknown as number
+    } else {
+      // Moving right or stopped - reset
+      tracking.isScrollingLeft = false
+      if (tracking.scrollStopTimeout) {
+        clearTimeout(tracking.scrollStopTimeout)
+        tracking.scrollStopTimeout = null
       }
-    }, SCROLL_STOP_DEBOUNCE_MS)
-  }, [onScrollLeft, onReachStart, onStopScrollingLeft, twelveMonthsPx])
-
-  const checkAndHandleRightEdge = useCallback((
-    currentScrollLeft: number,
-    prevScrollLeft: number,
-    scroller: HTMLElement
-  ) => {
-    const maxScroll = scroller.scrollWidth - scroller.clientWidth
-    const isAtEdge = currentScrollLeft >= maxScroll - RIGHT_EDGE_THRESHOLD_PX
-    const wasNotAtEdge = prevScrollLeft < maxScroll - RIGHT_EDGE_THRESHOLD_PX
-    
-    if (isAtEdge && wasNotAtEdge) {
-      if (!hasReachedEndRef.current) {
-        hasReachedEndRef.current = true
-        onReachEnd?.()
-      }
-    } else if (!isAtEdge) {
-      hasReachedEndRef.current = false
     }
-  }, [onReachEnd])
+    
+    // Check right edge
+    const maxScroll = scroller.scrollWidth - scroller.clientWidth
+    const isNearEnd = currentScrollLeft >= maxScroll - RIGHT_EDGE_THRESHOLD_PX
+    const wasNotNearEnd = prevScrollLeft < maxScroll - RIGHT_EDGE_THRESHOLD_PX
+    
+    if (isNearEnd && wasNotNearEnd && !tracking.hasReachedEnd) {
+      tracking.hasReachedEnd = true
+      onReachEnd?.()
+    } else if (!isNearEnd) {
+      tracking.hasReachedEnd = false
+    }
+    
+    // Update tracking
+    tracking.prevScrollLeft = currentScrollLeft
+  }, [onScrollLeft, onReachStart, onStopScrollingLeft, onReachEnd, twelveMonthsPx])
 
   const syncVerticalScroll = useCallback((from: HTMLElement, to: HTMLElement) => {
-    if (syncingRef.current) return
+    if (syncingVerticalRef.current) return
     
-    syncingRef.current = true
+    syncingVerticalRef.current = true
     to.scrollTop = from.scrollTop
     requestAnimationFrame(() => {
-      syncingRef.current = false
+      syncingVerticalRef.current = false
     })
   }, [])
 
@@ -275,26 +279,14 @@ export function useTimelineScroll(
 
   const handleRightScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const scroller = e.currentTarget
-    const currentScrollLeft = scroller.scrollLeft
-    const prevScrollLeft = prevScrollLeftRef.current
+    handleScrollUpdate(scroller.scrollLeft, scroller, e)
     
-    setScrollLeft(currentScrollLeft)
-
-    // Handle left scroll detection and callbacks
-    checkAndHandleLeftScroll(currentScrollLeft, prevScrollLeft, scroller, e)
-    
-    // Handle right edge detection
-    checkAndHandleRightEdge(currentScrollLeft, prevScrollLeft, scroller)
-    
-    // Update tracking state
-    prevScrollLeftRef.current = currentScrollLeft
-
     // Sync vertical scroll to left pane
     const left = leftScrollerRef.current
     if (left) {
       syncVerticalScroll(scroller, left)
     }
-  }, [checkAndHandleLeftScroll, checkAndHandleRightEdge, syncVerticalScroll])
+  }, [handleScrollUpdate, syncVerticalScroll])
 
   // ============================================================================
   // Handlers - Pointer Drag Panning
@@ -329,44 +321,34 @@ export function useTimelineScroll(
       
       const dx = ev.clientX - startX
       const newScrollLeft = startScrollLeft - dx
-      const prevScrollLeft = prevScrollLeftRef.current
       
       scroller.scrollLeft = newScrollLeft
-      setScrollLeft(newScrollLeft)
       
-      // Create synthetic event for callbacks
+      // Use synthetic event for the scroll update
       const syntheticEvent = createSyntheticScrollEvent(scroller)
-      
-      // Handle left scroll detection
-      checkAndHandleLeftScroll(
-        newScrollLeft, 
-        prevScrollLeft, 
-        scroller as HTMLDivElement,
-        syntheticEvent
-      )
-      
-      // Handle right edge detection
-      checkAndHandleRightEdge(newScrollLeft, prevScrollLeft, scroller)
-      
-      // Update tracking state
-      prevScrollLeftRef.current = newScrollLeft
+      handleScrollUpdate(newScrollLeft, scroller as HTMLDivElement, syntheticEvent)
     }
     
     const handleEnd = () => {
       panning = false
       el.style.cursor = prevCursor
       
-      // Handle scroll stop if we were panning left
-      if (wasScrollingLeftRef.current && lastScrollStateRef.current) {
-        wasScrollingLeftRef.current = false
+      // Trigger stop callback if we were scrolling left
+      const tracking = scrollTrackingRef.current
+      if (tracking.isScrollingLeft) {
+        tracking.isScrollingLeft = false
         
-        const syntheticEvent = createSyntheticScrollEvent(lastScrollStateRef.current.scroller)
+        if (tracking.scrollStopTimeout) {
+          clearTimeout(tracking.scrollStopTimeout)
+          tracking.scrollStopTimeout = null
+        }
         
+        const syntheticEvent = createSyntheticScrollEvent(scroller)
         onScrollLeft?.({
-          currentScrollLeft: lastScrollStateRef.current.currentScrollLeft,
-          prevScrollLeft: lastScrollStateRef.current.prevScrollLeft,
+          currentScrollLeft: tracking.prevScrollLeft,
+          prevScrollLeft: tracking.prevScrollLeft,
           scrollDelta: 0,
-          scroller: lastScrollStateRef.current.scroller,
+          scroller: scroller as HTMLDivElement,
           event: syntheticEvent
         })
         
@@ -383,7 +365,7 @@ export function useTimelineScroll(
     window.addEventListener('pointermove', handleMove)
     window.addEventListener('pointerup', handleEnd)
     window.addEventListener('pointercancel', handleEnd)
-  }, [checkAndHandleLeftScroll, checkAndHandleRightEdge, onScrollLeft, onStopScrollingLeft])
+  }, [handleScrollUpdate, onScrollLeft, onStopScrollingLeft])
 
   // ============================================================================
   // Return API
